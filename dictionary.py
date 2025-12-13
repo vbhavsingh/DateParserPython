@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from typing import List
 
-from .display import DisplayObject, TreeChar
-from .prediction import PredictionModelNode
+try:
+    from .display import DisplayObject, TreeChar
+    from .prediction import PredictionModelNode
+except ImportError:
+    from display import DisplayObject, TreeChar
+    from prediction import PredictionModelNode
 
 monthPredictionTree = PredictionModelNode()
 weekPredictionTree = PredictionModelNode()

@@ -3,7 +3,10 @@ from __future__ import annotations
 import random
 from typing import List
 
-from . import dictionary as Dictionary
+try:
+    from . import dictionary as Dictionary
+except ImportError:
+    import dictionary as Dictionary
 
 
 def isDateLieral(token: str) -> int:
@@ -164,4 +167,3 @@ def getDaysinMonth(month: int, year: int) -> int:
     if month % 2 == 1:
         return 30
     return 31
-

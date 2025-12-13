@@ -3,9 +3,14 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Optional
 
-from . import dictionary as Dictionary
-from . import helper as Helper
-from .models import DateElement, LocalDateModel
+try:
+    from . import dictionary as Dictionary
+    from . import helper as Helper
+    from .models import DateElement, LocalDateModel
+except ImportError:
+    import dictionary as Dictionary
+    import helper as Helper
+    from models import DateElement, LocalDateModel
 
 
 class Parser:
