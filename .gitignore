@@ -1,2 +1,14 @@
-venv/*
-.venv/*
+# Virtual environments
+venv/
+.venv/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pypirc
+
+# IDE clutter
+.idea/
