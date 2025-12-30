@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rm-date-parser"
-version = "0.1.0"
+version = "0.2.0"
 description = "Finds every date in text and returns each one with the detected format"
 readme = "README.md"
 authors = [
