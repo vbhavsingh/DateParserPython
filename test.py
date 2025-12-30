@@ -7,6 +7,16 @@ def main() -> None:
     parser = Parser()
     data = parser.parse(
         """
+        2025-12-12 02:10:34 AM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:34 PM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:34.235 AM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:34.235 PM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:343.345 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:343 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 22:10:343 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:343.123 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 22:10:343.345 (Another ISO 8601 variation with hyphens and time)
+        
         12/12/2025 (Common in the US, using MM/DD/YYYY format)
         12/12/25 (Shortened numerical format)
         2025/12/12 (ISO 8601 standard format, often used in data systems)
@@ -18,6 +28,15 @@ def main() -> None:
         12.12.2025 (Common in many parts of Europe, using DD.MM.YYYY)
         12-12-2025 (Using hyphens as separators, often MM-DD-YYYY or DD-MM-YYYY)
         2025-12-12 (Another ISO 8601 variation with hyphens)
+        2025-12-12 02:10:34 AM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:34 PM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:34.235 AM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:34.235 PM(Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:343.345 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:343 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 22:10:343 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 02:10:343.123 (Another ISO 8601 variation with hyphens and time)
+        2025-12-12 22:10:343.345 (Another ISO 8601 variation with hyphens and time)
         """
     )
     for parsed in data:
