@@ -150,19 +150,19 @@ class Parser:
         tokens: Iterable[str]
         if "." in s or "," in s:
             tokens = self._tokenize(s, ":., ")
-            hour, minute, second, millis = (int(token) for token in tokens)
+            hour, minute, second, millis = (int(token) for token in tokens[:4])
             if "." in s:
                 probable_time_format = format_string + ".SSS"
             if "," in s:
                 probable_time_format = format_string + ",SSS"
         else:
             tokens = self._tokenize(s, ": ")
-            hour, minute, second = (int(token) for token in tokens)
+            hour, minute, second = (int(token) for token in tokens[:3])
             millis = 0
         if element.hasAmPm:
             if "pm" in s.lower():
                 hour = hour + 12
-                probable_time_format = f"{probable_time_format} aaa"
+                probable_time_format = f"{probable_time_format}"
             format_string = format_string.replace("HH", "hh")
             probable_time_format = probable_time_format.replace("HH", "hh")
         if hour < 24 and minute < 60 and second < 60 and millis < 10000:
@@ -533,6 +533,7 @@ class Parser:
             ampm = f"{possible_time[time_frg_length - 2]}{possible_time[time_frg_length - 1]}"
             if ampm.lower() in {"am", "pm"}:
                 ele.hasAmPm = True
+                ele.endPos = count + 3
         ele.dateTimeSeprator = date_time_separator
         return date_groups
 
