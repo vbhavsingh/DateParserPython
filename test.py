@@ -1,6 +1,12 @@
 """Example script showcasing basic usage of dateparserpython."""
 
-from dateparserpython import Parser
+import os
+import sys
+
+# Use the package from this checkout's src/, not an older copy installed in the environment.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+from dateparserpython import Parser  # noqa: E402
 
 
 def main() -> None:
