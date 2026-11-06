@@ -34,6 +34,7 @@ class DateElement:
     startPos: int = 0
     endPos: int = 0
     hasAmPm: bool = False
+    amPmSeparator: str = " "
     timeFragment: Optional[str] = None
     dateFragment: Optional[str] = None
     dateTimeSeprator: str = " "

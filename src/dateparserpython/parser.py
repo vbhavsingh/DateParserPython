@@ -31,6 +31,8 @@ class Parser:
         if not groups:
             return date_groups
         for element in groups:
+            if not self._isPlausible(text, element):
+                continue
             localdate = self.getDateFromPhrase(element)
             if localdate is None:
                 continue
@@ -49,11 +51,50 @@ class Parser:
                 found_format = found_format.replace("&", delims[1] + delims[2])
             if element.isAlphaNumeric and Helper.isFullMonth(element.data):
                 found_format = found_format.replace("MMM", "MMMMM")
-            if element.hasAmPm:
-                found_format = f"{found_format} a"
+            if element.hasAmPm and "hh" in found_format:
+                found_format = f"{found_format}{element.amPmSeparator}a"
             localdate.identified_date_format = found_format
             date_groups.append(localdate)
         return date_groups
+
+    # Separators accepted between the fields of an all-numeric date. Comma and colon are left
+    # out: "3,4,25" is a list and "10:30:45" is a time.
+    NUMERIC_DATE_SEPARATORS = "/-. \\"
+    MAX_YEAR = 2999
+
+    def _isPlausible(self, text: str, element: DateElement) -> bool:
+        """Reject pattern matches that are almost never dates in real text."""
+        fragment = element.getDateFragment() or ""
+        tokens = re.findall(r"[0-9]+|[a-z]+", fragment.lower())
+        separators = re.findall(r"[^0-9A-Za-z]+", fragment)
+        if len(tokens) < 3 or len(separators) < 2:
+            return False
+        if any(len(t) == 4 and t.isdigit() and int(t) > self.MAX_YEAR for t in tokens):
+            return False
+        first, second = separators[0], separators[1]
+        if element.isAlphaNumeric:
+            if first == "," and second != ",":
+                return False  # "12,Dec 2025"; all-comma forms like "2025,01,Jan" are fine
+            if len(first) == len(second) == 1 and first != second and second != ",":
+                return False  # "12-Dec/2025"; "Dec 12,2025" is still fine
+            if tokens[0].isalpha() and len(tokens[2]) == 2 and "," not in second:
+                return False  # "May 12 13 people"; "Dec 12, 25" is still fine
+            return True
+        if first != second or len(first) != 1 or first not in self.NUMERIC_DATE_SEPARATORS:
+            return False  # mixed ("2025/12-12") or unsupported separators
+        year = tokens[0] if len(tokens[0]) == 4 or int(tokens[0]) > 31 else tokens[2]
+        if first == " " and len(year) != 4:
+            return False  # "8 9 10" in "qty 7 8 9 10"
+        if first == "." and len(year) == 2 and any(len(t) == 1 for t in tokens):
+            return False  # version numbers like "3.10.12"; "01.02.25" is still fine
+        # Part of a longer chain like "1.2.3.2024" or "12/12/2025/1".
+        start = element.startPos
+        if start >= 2 and text[start - 1] == first and text[start - 2].isdigit():
+            return False
+        end = element.endPos
+        if element.timeFragment is None and end + 2 < len(text) and text[end + 1] == first and text[end + 2].isdigit():
+            return False
+        return True
 
     def _tokenize(self, text: str, delimiters: str) -> List[str]:
         if delimiters not in self._tokenizer_cache:
@@ -74,7 +115,7 @@ class Parser:
             if Helper.isDigit(t1):
                 year = int(t1)
                 if year > 31:
-                    present_format = "yy$" if year < 99 else "yyyy$"
+                    present_format = "yy$" if year < 100 else "yyyy$"
                     if Helper.isDigit(t2):
                         present_format = present_format + "dd&MMM"
                         day = int(t2)
@@ -90,8 +131,9 @@ class Parser:
                         return local_date
             if Helper.isDigit(t3):
                 year = int(t3)
-                if year > 31:
-                    present_format = "yy" if year < 99 else "yyyy"
+                # A trailing two-digit value is the year even when it could be a day ("12 Dec 25").
+                if year > 31 or len(t3) == 2:
+                    present_format = "yy" if year < 100 else "yyyy"
                     if Helper.isDigit(t1):
                         present_format = f"dd$MMM&{present_format}"
                         day = int(t1)
@@ -141,11 +183,23 @@ class Parser:
                     if self.learnPattern and self.learnedPatternString is not None:
                         self.learnedPatternString = local_date.con_date_format
                     return local_date
+            # Two-digit year that is also a valid day/month (e.g. "12/12/25"): assume year-last.
+            if len(tokens[2]) == 2 and d3 <= 31 and 0 < d1 < 32 and 0 < d2 < 32:
+                local_date = self.getDetemintaionForYyyyPrefix(d1, d2, d3)
+                if local_date:
+                    local_date.original_text = element.data
+                    if self.learnPattern and self.learnedPatternString is not None:
+                        self.learnedPatternString = local_date.con_date_format
+                    return local_date
         return None
 
     def putTimeInDate(self, localdate: LocalDateModel, element: DateElement) -> LocalDateModel:
         format_string = "HH:mm:ss"
         s = element.timeFragment or ""
+        meridiem = ""
+        if element.hasAmPm:
+            meridiem = s[-2:].lower()
+            s = s[:-2].rstrip()
         probable_time_format = format_string
         tokens: Iterable[str]
         if "." in s or "," in s:
@@ -160,10 +214,13 @@ class Parser:
             hour, minute, second = (int(token) for token in tokens[:3])
             millis = 0
         if element.hasAmPm:
-            if "pm" in s.lower():
-                hour = hour + 12
-                probable_time_format = f"{probable_time_format}"
-            format_string = format_string.replace("HH", "hh")
+            if not 0 < hour <= 12:
+                return localdate
+            # 12 AM is midnight (00), 12 PM is noon (12).
+            if meridiem == "pm":
+                hour = hour % 12 + 12
+            else:
+                hour = hour % 12
             probable_time_format = probable_time_format.replace("HH", "hh")
         if hour < 24 and minute < 60 and second < 60 and millis < 10000:
             time_piece = f"{hour:02d}:{minute:02d}:{second:02d}"
@@ -185,7 +242,7 @@ class Parser:
             p_month = d2
             local_date = self.getYyyyMmDdProbable(pYear, p_month, p_date)
             if local_date:
-                if 9 < pYear < 100:
+                if 0 <= pYear < 100:
                     local_date.identified_date_format = "dd$MM&yy"
                 if 99 < pYear < 10000:
                     local_date.identified_date_format = "dd$MM&yyyy"
@@ -195,7 +252,7 @@ class Parser:
             p_month = d1
             local_date = self.getYyyyMmDdProbable(pYear, p_month, p_date)
             if local_date:
-                if 9 < pYear < 100:
+                if 0 <= pYear < 100:
                     local_date.identified_date_format = "MM$dd&yy"
                 if 99 < pYear < 10000:
                     local_date.identified_date_format = "MM$dd&yyyy"
@@ -205,7 +262,7 @@ class Parser:
             p_date = d2
             local_date = self.getYyyyMmDdProbable(pYear, p_month, p_date)
             if local_date:
-                if 9 < pYear < 100:
+                if 0 <= pYear < 100:
                     local_date.identified_date_format = "MM$dd&yy"
                 if 99 < pYear < 10000:
                     local_date.identified_date_format = "MM$dd&yyyy"
@@ -217,6 +274,7 @@ class Parser:
 
     def getYyyyMmDdProbable(self, pYear: int, pMonth: int, pDay: int) -> Optional[LocalDateModel]:
         year = pYear
+        full_year = self.expandTwoDigitYear(year)
         month = -100
         day = -100
         format_probable = ""
@@ -230,9 +288,7 @@ class Parser:
         else:
             return None
         if month == 2:
-            if year % 4 > 0 and pDay < 29:
-                day = pDay
-            elif year % 4 == 0 and pDay < 30:
+            if pDay < (30 if self.isLeapYear(full_year) else 29):
                 day = pDay
             else:
                 return None
@@ -249,7 +305,7 @@ class Parser:
         else:
             return None
         localdate = LocalDateModel()
-        localdate.date_time_string = f"{year:04d}-{month:02d}-{day:02d}"
+        localdate.date_time_string = f"{full_year:04d}-{month:02d}-{day:02d}"
         localdate.con_date_format = "yyyy-MM-dd"
         if 9 < year < 100:
             format_probable = "yy$" + format_probable
@@ -258,7 +314,24 @@ class Parser:
         localdate.identified_date_format = format_probable
         return localdate
 
+    def expandTwoDigitYear(self, year: int) -> int:
+        """Pivot two-digit years like strptime's %y: 00-68 -> 20xx, 69-99 -> 19xx."""
+        if 0 <= year < 100:
+            return year + (2000 if year < 69 else 1900)
+        return year
+
     def getDateGroups(self, text: str) -> Optional[List[DateElement]]:
+        groups = self._scanDateGroups(text)
+        if not groups:
+            return groups
+        resolved: List[DateElement] = []
+        for group in groups:
+            if resolved and group.startPos <= resolved[-1].endPos:
+                continue  # swallowed by a longer match chosen for the previous group
+            resolved.append(self._preferLaterMatch(text, group))
+        return resolved
+
+    def _scanDateGroups(self, text: str) -> Optional[List[DateElement]]:
         date_groups: Optional[List[DateElement]] = None
         possible_date = ["\x00"] * 30
         possible_time = ["\x00"] * 17
@@ -271,15 +344,43 @@ class Parser:
         is_alphanumeric = False
         date_time_separator = " "
         whitespace_count = 0
+        candidate_start = 0
+        time_start = 0
         tree = Dictionary.patternPredictionTree
         month = Dictionary.monthPredictionTree
         time = Dictionary.timePredictionTree
         text_length = len(text)
-        for count in range(text_length):
+        # When a candidate dies, restart_at is set and the scan resumes there with a clean state,
+        # so characters a failed candidate consumed (e.g. the "1" in "Entry 1: 2024/07/04") can't
+        # hide a date that starts later.
+        restart_at: Optional[int] = None
+        count = -1
+        while True:
+            if restart_at is not None:
+                count = restart_at
+                restart_at = None
+                possible_date = self.nullifyBuffer(possible_date)
+                possible_time = self.nullifyBuffer(possible_time)
+                i = 0
+                whitespace_count = 0
+                time_frg_length = 0
+                end_found_earlier = False
+                month_determined = False
+                search_for_time_piece = False
+                is_alphanumeric = False
+                marker = "0"
+                tree = Dictionary.patternPredictionTree
+                month = Dictionary.monthPredictionTree
+                time = Dictionary.timePredictionTree
+            else:
+                count += 1
+            if count >= text_length:
+                break
             c = text[count]
             if i == 0:
                 tree = Dictionary.patternPredictionTree
                 is_alphanumeric = False
+                candidate_start = count
             if i > 1 and possible_date[i - 1] == " " and c == " ":
                 whitespace_count += 1
                 continue
@@ -287,207 +388,230 @@ class Parser:
                 time_determined = time.explict_date_fragment
                 if time_frg_length > 12 and possible_time[time_frg_length - 1] == " ":
                     time_determined = True
-                if Helper.isDigit(c):
-                    time = time.get_child("D")
-                else:
-                    time = time.get_child(c.lower())
-                if time is None:
-                    if time_determined:
+                next_time = time.get_child("D" if Helper.isDigit(c) else c.lower())
+                if next_time is None:
+                    if time_determined and self._meridiemAt(text, count):
+                        # Meridiem written straight after the time: "10:20:30PM".
+                        for ch in text[count : count + 2]:
+                            possible_time[time_frg_length] = ch
+                            time_frg_length += 1
+                            possible_date[i] = ch
+                            i += 1
                         date_groups = self.addTimeFragment(
-                            date_groups, possible_date, possible_time, count, i, time_frg_length, date_time_separator
+                            date_groups, possible_date, possible_time, count + 1, i, time_frg_length, date_time_separator
                         )
-                    if time_frg_length > 0 and self.isValidTimeFragmentWithEndingDelim(possible_time):
+                        restart_at = count + 2
+                    elif time_determined:
+                        date_groups = self.addTimeFragment(
+                            date_groups, possible_date, possible_time, count - 1, i, time_frg_length, date_time_separator
+                        )
+                        restart_at = count
+                    elif time_frg_length > 0 and self.isValidTimeFragmentWithEndingDelim(possible_time):
                         possible_time[time_frg_length - 1] = " "
                         if i > 0:
                             possible_date[i - 1] = " "
                         date_groups = self.addTimeFragment(
-                            date_groups, possible_date, possible_time, count, i - 1, time_frg_length, date_time_separator
+                            date_groups, possible_date, possible_time, count - 2, i - 1, time_frg_length, date_time_separator
                         )
-                    search_for_time_piece = False
-                    possible_date = self.nullifyBuffer(possible_date)
-                    possible_time = self.nullifyBuffer(possible_time)
-                    end_found_earlier = False
-                    time = Dictionary.timePredictionTree
-                    i = 0
-                    whitespace_count = 0
-                    time_frg_length = 0
-                    continue
-                else:
-                    if time_determined:
-                        if count == text_length - 1:
-                            date_groups = self.addTimeFragment(
-                                date_groups, possible_date, possible_time, count, i, time_frg_length, date_time_separator
-                            )
-                            search_for_time_piece = False
-                            possible_date = self.nullifyBuffer(possible_date)
-                            possible_time = self.nullifyBuffer(possible_time)
-                            end_found_earlier = False
-                            time = Dictionary.timePredictionTree
-                            i = 0
-                            whitespace_count = 0
-                            time_frg_length = 0
-                            continue
-                        if c == " ":
-                            try:
-                                next_chars = text[count + 1 : count + 3]
-                                if next_chars.lower() in {"am", "pm"}:
-                                    possible_time[time_frg_length] = c
-                                    time_frg_length += 1
-                                    possible_date[i] = c
-                                    i += 1
-
-                                    possible_time[time_frg_length] = text[count + 1]
-                                    time_frg_length += 1
-                                    possible_date[i] = text[count + 1]
-                                    i += 1
-
-                                    possible_time[time_frg_length] = text[count + 2]
-                                    time_frg_length += 1
-                                    possible_date[i] = text[count + 2]
-                                    i += 1
-                            except IndexError:
-                                pass
-                            date_groups = self.addTimeFragment(
-                                date_groups, possible_date, possible_time, count, i, time_frg_length, date_time_separator
-                            )
-                            search_for_time_piece = False
-                            possible_date = self.nullifyBuffer(possible_date)
-                            possible_time = self.nullifyBuffer(possible_time)
-                            end_found_earlier = False
-                            time = Dictionary.timePredictionTree
-                            i = 0
-                            whitespace_count = 0
-                            time_frg_length = 0
-                            continue
+                        restart_at = count
                     else:
-                        if count == text_length - 1 and time.explict_date_fragment:
-                            if Helper.isDigit(c):
-                                possible_time[time_frg_length] = c
+                        # Not a time after all; rescan those characters as possible dates.
+                        restart_at = time_start
+                    continue
+                time = next_time
+                if time_determined:
+                    if count == text_length - 1:
+                        date_groups = self.addTimeFragment(
+                            date_groups, possible_date, possible_time, count - 1, i, time_frg_length, date_time_separator
+                        )
+                        break
+                    if c == " ":
+                        time_end = count - 1
+                        if self._meridiemAt(text, count + 1):
+                            for ch in text[count : count + 3]:
+                                possible_time[time_frg_length] = ch
                                 time_frg_length += 1
-                                possible_date[i] = c
+                                possible_date[i] = ch
                                 i += 1
-                            date_groups = self.addTimeFragment(
-                                date_groups, possible_date, possible_time, count, i, time_frg_length, date_time_separator
-                            )
-                            search_for_time_piece = False
-                            possible_date = self.nullifyBuffer(possible_date)
-                            possible_time = self.nullifyBuffer(possible_time)
-                            end_found_earlier = False
-                            time = Dictionary.timePredictionTree
-                            i = 0
-                            whitespace_count = 0
-                            time_frg_length = 0
-                            continue
-                    possible_time[time_frg_length] = c
-                    time_frg_length += 1
-                    possible_date[i] = c
-                    i += 1
+                            time_end = count + 2
+                        date_groups = self.addTimeFragment(
+                            date_groups, possible_date, possible_time, time_end, i, time_frg_length, date_time_separator
+                        )
+                        restart_at = time_end + 1
+                        continue
+                elif count == text_length - 1 and time.explict_date_fragment:
+                    time_end = count - 1
+                    if Helper.isDigit(c):
+                        possible_time[time_frg_length] = c
+                        time_frg_length += 1
+                        possible_date[i] = c
+                        i += 1
+                        time_end = count
+                    date_groups = self.addTimeFragment(
+                        date_groups, possible_date, possible_time, time_end, i, time_frg_length, date_time_separator
+                    )
+                    break
+                possible_time[time_frg_length] = c
+                time_frg_length += 1
+                possible_date[i] = c
+                i += 1
                 continue
-            if Helper.isDigit(c) or Helper.isDelimeter(c) or Helper.isTimeSeprator(c):
+            # "T" separates date and time only between digits (2025-12-12T10:00:00);
+            # anywhere else it is a letter, e.g. in "OCT" or "AUGUST".
+            is_iso_t = (
+                c == "T" and 0 < count < text_length - 1 and text[count - 1].isdigit() and text[count + 1].isdigit()
+            )
+            if Helper.isDigit(c) or Helper.isDelimeter(c) or (Helper.isTimeSeprator(c) and (c != "T" or is_iso_t)):
                 if marker == "M":
                     if month_determined:
                         is_alphanumeric = True
                         tree = tree.get_child(marker)
-                        if tree is None and end_found_earlier:
+                        if tree is None:
+                            restart_at = self._nextTokenStart(text, candidate_start)
                             continue
+                        # Patterns such as yyyy-dd-MMM end on the month itself.
+                        end_found_earlier = tree.explict_date_fragment
                     else:
+                        # A partial month name ("Ma") followed by a digit/delimiter: start over at c.
                         tree = Dictionary.patternPredictionTree
                         possible_date = self.nullifyBuffer(possible_date)
                         i = 0
                         whitespace_count = 0
                         end_found_earlier = False
+                        candidate_start = count
                     month = Dictionary.monthPredictionTree
                 marker = "D" if Helper.isDigit(c) else "*"
-                if tree is None:
-                    if end_found_earlier:
-                        date_groups = self.addDateFragment(
-                            date_groups, possible_date, count, time_frg_length + i + whitespace_count, is_alphanumeric
-                        )
-                        is_alphanumeric = False
-                        if Helper.isDigit(c):
-                            time = time.get_child("D")
-                            if time is not None:
-                                possible_time[time_frg_length] = c
-                                time_frg_length += 1
-                                search_for_time_piece = True
-                                possible_date[i] = c
-                                i += 1
-                            else:
-                                possible_date = self.nullifyBuffer(possible_date)
-                                i = 0
-                                whitespace_count = 0
-                                end_found_earlier = False
-                        else:
-                            possible_date = self.nullifyBuffer(possible_date)
-                            i = 0
-                            whitespace_count = 0
-                            end_found_earlier = False
-                        end_found_earlier = False
+                next_tree = tree.get_child(marker)
+                if next_tree is None:
+                    if not end_found_earlier:
+                        restart_at = self._nextTokenStart(text, candidate_start)
+                        continue
+                    date_groups = self.addDateFragment(
+                        date_groups, possible_date, count - 1, time_frg_length + i + whitespace_count, is_alphanumeric
+                    )
+                    end_found_earlier = False
+                    is_alphanumeric = False
+                    if Helper.isTimeSeprator(c):
+                        search_for_time_piece = True
+                        possible_date[i] = c
+                        i += 1
+                        date_time_separator = c
+                        time_start = count + 1
                         tree = Dictionary.patternPredictionTree
                         month = Dictionary.monthPredictionTree
-                        continue
                     else:
-                        possible_date = self.nullifyBuffer(possible_date)
-                        i = 0
-                        whitespace_count = 0
-                        end_found_earlier = False
-                        tree = Dictionary.patternPredictionTree
-                        month = Dictionary.monthPredictionTree
-                        continue
-                tree = tree.get_child(marker)
-                if tree is None:
-                    if end_found_earlier:
-                        date_groups = self.addDateFragment(
-                            date_groups, possible_date, count, time_frg_length + i + whitespace_count, is_alphanumeric
-                        )
-                        end_found_earlier = False
-                        is_alphanumeric = False
-                        if Helper.isTimeSeprator(c):
-                            search_for_time_piece = True
-                            possible_date[i] = c
-                            i += 1
-                            date_time_separator = c
-                        else:
-                            possible_date = self.nullifyBuffer(possible_date)
-                            i = 0
-                            whitespace_count = 0
-                        tree = Dictionary.patternPredictionTree
-                        month = Dictionary.monthPredictionTree
+                        restart_at = count
                     continue
-                else:
-                    possible_date[i] = c
-                    i += 1
-                    end_found_earlier = tree.explict_date_fragment
-                    if count == text_length - 1 and end_found_earlier:
-                        date_groups = self.addDateFragment(
-                            date_groups, possible_date, count, time_frg_length + i + whitespace_count, is_alphanumeric
-                        )
-                        is_alphanumeric = False
-                        break
+                tree = next_tree
+                possible_date[i] = c
+                i += 1
+                end_found_earlier = tree.explict_date_fragment
+                if count == text_length - 1 and end_found_earlier:
+                    date_groups = self.addDateFragment(
+                        date_groups, possible_date, count, time_frg_length + i + whitespace_count, is_alphanumeric
+                    )
+                    break
             else:
+                # A complete date immediately followed by a letter (e.g. "07/04/2026Address"):
+                # no pattern continues a finished date with a month, so close it out first.
+                if end_found_earlier:
+                    date_groups = self.addDateFragment(
+                        date_groups, possible_date, count - 1, time_frg_length + i + whitespace_count, is_alphanumeric
+                    )
+                    restart_at = count
+                    continue
                 marker = "M"
                 c_lower = c.lower()
-                month = month.get_child(c_lower)
-                if month is None:
-                    if end_found_earlier:
+                next_month = month.get_child(c_lower)
+                if next_month is None:
+                    # A date ending on its month ("2025 15 Dec") closed by punctuation or a newline.
+                    if month_determined and not c.isalpha() and self._endsOnMonth(tree):
                         date_groups = self.addDateFragment(
-                            date_groups, possible_date, count, time_frg_length + i + whitespace_count, is_alphanumeric
+                            date_groups, possible_date, count - 1, i + whitespace_count, True
                         )
-                        is_alphanumeric = False
-                        end_found_earlier = False
-                    possible_date = self.nullifyBuffer(possible_date)
-                    i = 0
-                    whitespace_count = 0
-                    month = Dictionary.monthPredictionTree
-                    tree = Dictionary.patternPredictionTree
-                    month_determined = False
-                    end_found_earlier = False
+                        restart_at = count
+                    else:
+                        restart_at = self._nextTokenStart(text, candidate_start)
                     continue
-                else:
-                    month_determined = month.explict_date_fragment
-                    possible_date[i] = c_lower
-                    i += 1
+                month = next_month
+                month_determined = month.explict_date_fragment
+                possible_date[i] = c_lower
+                i += 1
+        # A date ending on its month at the very end of the text ("... 2025 15 Dec").
+        if marker == "M" and month_determined and not search_for_time_piece and self._endsOnMonth(tree):
+            date_groups = self.addDateFragment(date_groups, possible_date, text_length - 1, i + whitespace_count, True)
         return date_groups
+
+    def _nextTokenStart(self, text: str, position: int) -> int:
+        """Index of the first number or word that starts after `position` (len(text) if none)."""
+        for j in range(position + 1, len(text)):
+            prev, cur = text[j - 1], text[j]
+            if (cur.isdigit() and not prev.isdigit()) or (cur.isalpha() and not prev.isalpha()):
+                return j
+        return len(text)
+
+    def _meridiemAt(self, text: str, position: int) -> bool:
+        """True if text has a standalone "am"/"pm" at position (not the start of "amazing")."""
+        word = text[position : position + 2]
+        after = position + 2
+        return word.lower() in {"am", "pm"} and (after >= len(text) or not text[after].isalpha())
+
+    def _preferLaterMatch(self, text: str, group: DateElement) -> DateElement:
+        """
+        A stray number before a date can form a shorter date of its own: "1 12/12/2025" first
+        matches "1 12/12", and "No. 7 December 12, 2025" matches "7 December 12". When such a
+        match runs straight into more digits, prefer a valid match starting at its next token
+        if that one reaches further.
+        """
+        while True:
+            fragment = group.getDateFragment() or ""
+            if group.isAlphaNumeric:
+                # Only a trailing two-digit year can really be the day of a longer date.
+                if not re.search(r"(?<![0-9])[0-9]{2}$", fragment):
+                    break
+            else:
+                delims = re.sub(r"[0-9]", "", fragment)
+                if len(delims) != 2 or delims[0] == delims[1]:
+                    break
+            after = group.endPos + 1
+            while after < len(text) and after <= group.endPos + 2 and Helper.isDelimeter(text[after]):
+                after += 1
+            if after == group.endPos + 1 or after >= len(text) or not text[after].isdigit():
+                break
+            later_start = self._nextTokenStart(text, group.startPos)
+            if later_start > group.endPos:
+                break
+            window_end = min(len(text), group.endPos + 64)
+            later_groups = self._scanDateGroups(text[later_start:window_end])
+            if not later_groups:
+                break
+            later = later_groups[0]
+            if (
+                later.startPos != 0
+                or later.isAlphaNumeric != group.isAlphaNumeric
+                or later_start + later.endPos <= group.endPos
+                or (window_end < len(text) and later.endPos >= window_end - later_start - 1)
+                or self.getDateFromPhrase(later) is None
+            ):
+                break
+            later_fragment = later.getDateFragment() or ""
+            if later.isAlphaNumeric:
+                if not re.search(r"[0-9]{4}$", later_fragment):
+                    break  # only give up "7 Dec 12" for something firmer, like "Dec 12, 2025"
+            else:
+                later_delims = re.sub(r"[0-9]", "", later_fragment)
+                if len(later_delims) != 2 or later_delims[0] != later_delims[1]:
+                    break
+            later.startPos += later_start
+            later.endPos += later_start
+            group = later
+        return group
+
+    def _endsOnMonth(self, tree) -> bool:
+        if tree is None:
+            return False
+        node = tree.get_child("M")
+        return node is not None and node.explict_date_fragment
 
     def addDateFragment(
         self,
@@ -518,28 +642,30 @@ class Parser:
         date_groups: Optional[List[DateElement]],
         possible_date: List[str],
         possible_time: List[str],
-        count: int,
+        end: int,
         i: int,
         time_frg_length: int,
         date_time_separator: str,
     ) -> Optional[List[DateElement]]:
+        """`end` is the index of the last character of the time, including any AM/PM."""
         if not date_groups:
             return date_groups
         ele = date_groups[-1]
         ele.data = self._buffer_to_string(possible_date)
-        ele.endPos = count
+        ele.endPos = end
         ele.timeFragment = self._buffer_to_string(possible_time)
         if time_frg_length >= 2:
             ampm = f"{possible_time[time_frg_length - 2]}{possible_time[time_frg_length - 1]}"
             if ampm.lower() in {"am", "pm"}:
                 ele.hasAmPm = True
-                ele.endPos = count + 3
+                ele.amPmSeparator = " " if time_frg_length >= 3 and possible_time[time_frg_length - 3] == " " else ""
         ele.dateTimeSeprator = date_time_separator
         return date_groups
 
     def createDateFragment(
         self, buffer: List[str], position: int, length: int, is_alphanumeric: bool
     ) -> Optional[DateElement]:
+        """`position` is the index of the date's last character; start/end are inclusive."""
         date_text = self._buffer_to_string(buffer)
         if not date_text:
             return None
@@ -558,6 +684,9 @@ class Parser:
 
     def _buffer_to_string(self, buffer: List[str]) -> str:
         return "".join(ch for ch in buffer if ch and ch != "\x00").strip()
+
+    def isLeapYear(self, year: int) -> bool:
+        return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
     def is31DayMonth(self, value: int) -> bool:
         return value in {1, 3, 5, 7, 8, 10, 12}

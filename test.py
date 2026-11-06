@@ -37,6 +37,9 @@ def main() -> None:
         2025-12-12 22:10:343 (Another ISO 8601 variation with hyphens and time)
         2025-12-12 02:10:343.123 (Another ISO 8601 variation with hyphens and time)
         2025-12-12 22:10:343.345 (Another ISO 8601 variation with hyphens and time)
+
+        Date of Birth: 09/08/25
+        Date of Birth:07/04/2026Address
         """
     )
     for parsed in data:
